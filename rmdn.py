@@ -1,5 +1,5 @@
 '''
-This module provides the architecture and loss functions that characterize 
+This module provides the architecture and loss functions that characterize
 recurrent mixture density networks
 
 Methods
@@ -39,39 +39,52 @@ class RMDN(nn.Module):
         pi : nn.Linear
         mu : nn.Linear
         sigma : nn.Linear
-    
+
     Methods
     -------
         __init__(hidden_size, input_size, output_size, num_gaussians)
         forward(x, epoch, max_epochs, train, outputs, return_hidden)
-    
+
     '''
-    def __init__(self, hidden_size, input_size=2, output_size=1, num_gaussians=3):
+    def __init__(self,
+                 hidden_size,
+                 input_size=2,
+                 output_size=1,
+                 num_gaussians=3):
         '''
-        
+
         '''
         super(RMDN, self).__init__()
+
         self.hidden_size = hidden_size
         self.input_size = input_size
         self.output_size = output_size
         self.num_gaussians = num_gaussians
         self.feedback_size = self.output_size * self.num_gaussians
-        
+
         # Recurrent Layers
-        self.rnn = nn.GRU(input_size=self.input_size, hidden_size=self.hidden_size, num_layers=1, batch_first=True)
+        self.rnn = nn.GRU(input_size=self.input_size,
+                          hidden_size=self.hidden_size,
+                          num_layers=1,
+                          batch_first=True)
 
         # fc Layer
         # fc in_features: hidden_size + mus_{t-1} + sigmas_{t-1} + y_{t-1}
-        self.fc = nn.Linear(in_features=(self.hidden_size + (2 * self.feedback_size) + self.output_size), out_features=(2 * self.hidden_size))
+        self.fc = nn.Linear(in_features=(self.hidden_size + (2 * self.feedback_size) + self.output_size),
+                            out_features=(2 * self.hidden_size))
 
         # Mixture Density Output Layers
-        self.pi = nn.Linear(in_features=(2 * self.hidden_size), out_features=self.num_gaussians) # Mixture cofficients
-        self.mu = nn.Linear(in_features=(2 * self.hidden_size), out_features=self.feedback_size) # Means
-        self.sigma = nn.Linear(in_features=(2 * self.hidden_size), out_features=self.feedback_size) # Variances
+        self.pi = nn.Linear(in_features=(2 * self.hidden_size),
+                            out_features=self.num_gaussians) # Mixture cofficients
+        self.mu = nn.Linear(in_features=(2 * self.hidden_size),
+                            out_features=self.feedback_size) # Means
+        self.sigma = nn.Linear(in_features=(2 * self.hidden_size),
+                               out_features=self.feedback_size) # Variances
 
         self.apply(self._init_weights)
 
-    def _init_weights(self, module):
+    def _init_weights(self,
+                      module):
         '''
 
         '''
@@ -82,7 +95,13 @@ class RMDN(nn.Module):
                 if 'weight' in name:
                     nn.init.orthogonal_(param)
 
-    def forward(self, x, epoch=None, max_epochs=None, train=True, outputs=None, return_hidden=False):
+    def forward(self,
+                x,
+                epoch=None,
+                max_epochs=None,
+                train=True,
+                outputs=None,
+                return_hidden=False):
         '''
         Run the forward pass through the network
 
@@ -97,17 +116,17 @@ class RMDN(nn.Module):
 
         Returns
         -------
-            pis : 
+            pis :
             mus :
             sigmas :
             output :
             h_states :
-        
+
         Notes
         -----
             feedback: during training, y_{t-1} is taken from outputs (teacher forcing)
                       during inference, it is sampled from the output distribution
-                    
+
             sigma: represents standard deviations (not variances).
         '''
 
@@ -145,7 +164,7 @@ class RMDN(nn.Module):
 
             mu_t = self.mu(h_stacked).view(h_stacked.size(0), h_stacked.size(1), self.num_gaussians, self.output_size)
             mus.append(mu_t)
-            
+
             sigma_t = self.sigma(h_stacked).view(h_stacked.size(0), h_stacked.size(1), self.num_gaussians, self.output_size)
             sigma_t = torch.clamp(nn.Softplus()(sigma_t), min=1e-3)
             sigmas.append(sigma_t)
@@ -174,7 +193,7 @@ class RMDN(nn.Module):
         mus = torch.stack(mus, dim=1).squeeze(2)
         sigmas = torch.stack(sigmas, dim=1).squeeze(2)
         h_states = torch.stack(h_states, dim=1)
-        
+
         if train:
             return pis, mus, sigmas, h_states
         else:
@@ -184,15 +203,18 @@ class RMDN(nn.Module):
             else:
                 return pis, mus, sigmas, output
 
-    def _sample_output(self, pi, mu, sigma):
+    def _sample_output(self,
+                       pi,
+                       mu,
+                       sigma):
         '''
         Sample one output per batch (for the current time step) from the mixture ~ N(mu_cond, sigma_cond).
-            
+
             Assumes:
             pi:  (batch, 1, num_gaussians)
             mu:  (batch, 1, num_gaussians, output_size)
             sigma: (batch, 1, num_gaussians, output_size)
-            
+
             Returns:
             A sample of shape (batch, 1, output_size)
         '''
@@ -200,13 +222,13 @@ class RMDN(nn.Module):
         pi = pi.squeeze(1)
         mu = mu.squeeze(1)
         sigma = sigma.squeeze(1)
-        
+
         # Sample a mixture component for each batch element.
         component_indices = torch.multinomial(pi, num_samples=1)  # (batch, 1)
         component_indices_expanded = component_indices.unsqueeze(-1).expand(-1, -1, mu.size(-1))  # (batch, 1, output_size)
         chosen_mu = torch.gather(mu, 1, component_indices_expanded).squeeze(1)       # (batch, output_size)
         chosen_sigma = torch.gather(sigma, 1, component_indices_expanded).squeeze(1) # (batch, output_size)
-        
+
         noise = torch.randn_like(chosen_mu)
         sample = chosen_mu + chosen_sigma * noise
         return sample.unsqueeze(1)  # shape: (batch, 1, output_size)
@@ -216,7 +238,12 @@ class RMDN(nn.Module):
 ## (Implicitely) Conditional Negative Log-Likelihood ##
 #######################################################
 
-def mdn_loss(pi, mu, sigma, targets, lambda_s=0.01, eps=1e-8):
+def mdn_loss(pi,
+             mu,
+             sigma,
+             targets,
+             lambda_s=0.01,
+             eps=1e-8):
     '''
     Computes the conditional negative log-likelihood for the MDN output.
 
@@ -226,7 +253,7 @@ def mdn_loss(pi, mu, sigma, targets, lambda_s=0.01, eps=1e-8):
         mu      : Tensor of shape (batch, seq_len, num_gaussians, output_size)
         sigma   : Tensor of shape (batch, seq_len, num_gaussians, output_size) (assumed to be std)
         targets : Tensor of shape (batch, seq_len, output_size)
-        
+
     Returns
     -------
         loss: Tensor of scalars
@@ -236,7 +263,7 @@ def mdn_loss(pi, mu, sigma, targets, lambda_s=0.01, eps=1e-8):
     # => Entropy loss prevents extreme confidence in one mixture component, hopefully leading to smoother output dynamics
     entropy_loss = -lambda_s * torch.sum(pi * torch.log(pi + eps), dim=-1)
     entropy_loss = entropy_loss.mean()
-    
+
     targets = targets.unsqueeze(2).expand_as(mu)  # Match shape for mixture components
     pi = pi.unsqueeze(-1).expand_as(mu) # Reshape pi to use the same mixing coefficients for all outputs
 
