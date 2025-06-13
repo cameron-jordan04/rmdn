@@ -269,15 +269,20 @@ class DecisionDataset(Dataset):
                     std_dev_sec = self.params['min_experimental_std_dev']
                     logger.debug('Trial %s: choice interval <= 0, using min_experimental_std', trial_key)
 
-                std_dev_samples = int(round(std_dev_sec * self.params['sample_rate']))
-                std_devs.append(std_dev_samples)
-
                 # Calculate bump_mean
                 bump_peak_time_relative_to_onset_set = choice_sec - tone_onset_sec
 
                 bump_peak_time_idx = np.argmin(np.abs(self.time - bump_peak_time_relative_to_onset_set))
                 bump_peak_time_idx = np.clip(bump_peak_time_idx, 0, self.params['seq_len'] - 1)
+
+                if bump_peak_time_idx >= DEFAULT_PARAMS['seq_len']:
+                    drop_idxs.append(index)
+                    continue
+
                 peak_times.append(bump_peak_time_idx)
+
+                std_dev_samples = int(round(std_dev_sec * self.params['sample_rate']))
+                std_devs.append(std_dev_samples)
 
                 # Determine zero_until time
                 zero_until_time_relative_to_onset_sec = t_entry_sec - tone_onset_sec
@@ -341,8 +346,9 @@ class DecisionDataset(Dataset):
                 logger.error('Failed to retrieve parameters for index %d: %s', index, e)
                 raise RuntimeError(f'Internal error retrieving trial parameters for index {index}') from e
 
-            return self._build_sample_tensors(p_trial, decision_trial, bump_peak_time_idx_trial,
+            inputs_tensor, target_tensor = self._build_sample_tensors(p_trial, decision_trial, bump_peak_time_idx_trial,
                                               std_dev_samples_trial, zero_until_idx_trial)
+            return inputs_tensor, target_tensor, p_trial
 
     def plot_trial(self,
                    index=None,
@@ -372,7 +378,7 @@ class DecisionDataset(Dataset):
                 return
 
             try:
-                inputs, targets = self.__getitem__(index=plot_index)
+                inputs, targets, p_trial = self.__getitem__(index=plot_index)
                 trial_info = self.df.iloc[plot_index]
                 title_suffix = (f"(Experimental, Index: {plot_index}, Animal/Session: {trial_info['animal']}/{trial_info['session']})")
             except (IndexError, RuntimeError) as e:

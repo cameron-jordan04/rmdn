@@ -6,6 +6,7 @@ A Recurrent Mixture Density Network implementation for the analysis of experimen
 
 ## TODO:
 - [ ] Evaluate/test manifold visualization functions
+    - [ ] Update manifold visualizations to include UMAP (Uniform Manifold Approximation and Projection)
 - [ ] Evaluate manifold activity under various training paradigms: 
     1. Curriculum learning (the experimental paradigm under which the rodents are trained)
     2. General training paradigm (no separation of training data/trials by reward probability)

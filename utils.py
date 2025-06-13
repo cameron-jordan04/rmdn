@@ -77,6 +77,7 @@ def visualize_performance(model: torch.nn.Module,
     """
 
     model.eval()
+    p_val_dict = {0.0 : 0, 0.2 : 1, 0.8 : 2, 1.0 : 3}
 
     if not dataset.generate and p_list is not None:
         logger.warning("'p_list' is provided but dataset is in load mode")
@@ -92,13 +93,18 @@ def visualize_performance(model: torch.nn.Module,
     num_p_groups = len(p_values_to_plot)  # Number of probability values
 
     # Create a colormap for `n` different colors per probability value
-    colors = plt.cm.viridis(np.linspace(0, 1, n_samples)) # pylint: disable=no-member
+    if dataset.generate:
+        colors = plt.cm.viridis(np.linspace(0, 1, n_samples)) # pylint: disable=no-member
+    else:
+        colors = plt.cm.viridis(np.linspace(0, 1, 4)) # pylint: disable=no-member | 4 colors -- 4 probability values
 
     # Initialize figure with appropriate grid layout (rows = #p values, cols = 2: target + output)
     _, axes = plt.subplots(num_p_groups, 2, figsize=(12, 3 * num_p_groups),
                            sharex=True, sharey=True, squeeze=False)
 
     time = dataset.time
+
+    p_colors_seen = {}
 
     for p_idx, p_val in enumerate(p_values_to_plot):
         ax_target, ax_output = axes[p_idx, 0], axes[p_idx, 1]
@@ -128,7 +134,7 @@ def visualize_performance(model: torch.nn.Module,
                     inputs, targets = dataset.__getitem__(index=0, p=p_val)
                 else:
                     random_index = np.random.randint(0, len(dataset))
-                    inputs, targets = dataset.__getitem__(index=random_index)
+                    inputs, targets, p_val = dataset.__getitem__(index=random_index)
 
                 inputs = inputs.unsqueeze(0).to(device)
 
@@ -151,23 +157,74 @@ def visualize_performance(model: torch.nn.Module,
                 else:
                     time_plot = time
 
-                label_suffix = f' Trial {i + 1}'
-                ax_target.plot(time_plot, targets_np, color=colors[i], alpha=0.8, label='Target' + label_suffix)
-                ax_output.plot(time_plot, output_np, color=colors[i], alpha=0.8, label='Output' + label_suffix)
+                if dataset.generate:
+                    label_suffix = f' Trial {i + 1}'
+                    ax_target.plot(time_plot, targets_np, color=colors[i], alpha=0.8, label='Target' + label_suffix)
+                    ax_output.plot(time_plot, output_np, color=colors[i], alpha=0.8, label='Output' + label_suffix)
+                else:
+                    color_idx = p_val_dict[p_val]
+                    color=colors[color_idx]
+
+                    # Store this p_value and color for legend
+                    if p_val not in p_colors_seen:
+                        p_colors_seen[p_val] = color
+
+                    # Only add label for the first occurrence of each p_value
+                    existing_p_vals_target = [line.get_label().split('(p=')[1].split(')')[0] for line in ax_target.get_lines() if '(p=' in line.get_label()]
+                    existing_p_vals_output = [line.get_label().split('(p=')[1].split(')')[0] for line in ax_output.get_lines() if '(p=' in line.get_label()]
+                    
+                    target_label = f'Target (p={p_val})' if str(p_val) not in existing_p_vals_target else None
+                    output_label = f'Output (p={p_val})' if str(p_val) not in existing_p_vals_output else None
+                    
+                    ax_target.plot(time_plot, targets_np, color=color, alpha=0.8, 
+                                 label=target_label if target_label else None)
+                    ax_output.plot(time_plot, output_np, color=color, alpha=0.8, 
+                                 label=output_label if output_label else None)
 
             except IndexError as e:
                 logger.error('IndexError during visualization sample %d: %s', i, e)
                 break
 
-            handles_target, labels_target = ax_target.get_legend_handles_labels()
+            # Handle legends
+            if dataset.generate:
+                handles_target, labels_target = ax_target.get_legend_handles_labels()
+                if handles_target:
+                    ax_target.legend([handles_target[0]], [labels_target[0].split(' Trial')[0]], loc='best')
 
-            if handles_target:
-                ax_target.legend([handles_target[0]], [labels_target[0].split(' Trial')[0]], loc='best')
+                handles_output, labels_output = ax_output.get_legend_handles_labels()
+                if handles_output:
+                    ax_output.legend([handles_output[0]], [labels_output[0].split(' Trial')[0]], loc='best')
+            else:
+                # For non-generate case, show legend with probability values and colors
+                handles_target, labels_target = ax_target.get_legend_handles_labels()
+                if handles_target:
+                    # Get unique labels to avoid duplicates
+                    unique_labels = []
+                    unique_handles = []
+                    seen_p_vals = set()
+                    for handle, label in zip(handles_target, labels_target):
+                        if '(p=' in label:
+                            p_val_str = label.split('(p=')[1].split(')')[0]
+                            if p_val_str not in seen_p_vals:
+                                unique_handles.append(handle)
+                                unique_labels.append(label)
+                                seen_p_vals.add(p_val_str)
+                    ax_target.legend(unique_handles, unique_labels, loc='best')
 
-            handles_output, labels_output = ax_output.get_legend_handles_labels()
-
-            if handles_output:
-                ax_output.legend([handles_output[0]], [labels_output[0].split(' Trial')[0]], loc='best')
+                handles_output, labels_output = ax_output.get_legend_handles_labels()
+                if handles_output:
+                    # Get unique labels to avoid duplicates
+                    unique_labels = []
+                    unique_handles = []
+                    seen_p_vals = set()
+                    for handle, label in zip(handles_output, labels_output):
+                        if '(p=' in label:
+                            p_val_str = label.split('(p=')[1].split(')')[0]
+                            if p_val_str not in seen_p_vals:
+                                unique_handles.append(handle)
+                                unique_labels.append(label)
+                                seen_p_vals.add(p_val_str)
+                    ax_output.legend(unique_handles, unique_labels, loc='best')
 
     for ax in axes[-1, :]:
         ax.set_xlabel("Time (s)")
@@ -223,7 +280,7 @@ def visualize_mixture_components(model : torch.nn.Module,
                 inputs, _ = dataset.__getitem__(index=0, p=p_val) # index ignored
             else:
                 random_index = np.random.randint(0, len(dataset))
-                inputs, _ = dataset.__getitem__(index=random_index)
+                inputs, _, p_val = dataset.__getitem__(index=random_index)
 
             inputs = inputs.unsqueeze(0).to(device) # Add batch dim
 
@@ -242,10 +299,10 @@ def visualize_mixture_components(model : torch.nn.Module,
             sigma = output_tuple[2]
 
             # Validate shapes (expecting Batch, SeqLen, NComponents)
-            expected_shape_part = (1, dataset.params['seq_len'], n_components)
-            if pi.shape != expected_shape_part or mu.shape != expected_shape_part or sigma.shape != expected_shape_part:
-                logger.warning("Unexpected component tensor shape for p=%d. ", p_val)
-                continue
+            # expected_shape_part = (1, dataset.params['seq_len'] - 1, n_components)
+            # if pi.shape != expected_shape_part or mu.shape != expected_shape_part or sigma.shape != expected_shape_part:
+            #     logger.warning("Unexpected component tensor shape for p=%d. ", p_val)
+            #     continue
 
             # Convert tensors to NumPy arrays (remove batch dimension)
             pi_np = pi.squeeze(0).cpu().numpy()        # Shape: (SEQ_LEN, n_components)
@@ -320,6 +377,7 @@ def visualize_manifold(model: torch.nn.Module,
         dataset : PyTorch Dataset
         method : str
             Accepts 'pca' and 'tsne'
+            # TODO: update to include UMAP
         p : float
     '''
 
@@ -331,7 +389,7 @@ def visualize_manifold(model: torch.nn.Module,
             p_val_used = p if p is not None else "random"
         else:
             idx = np.random.randint(len(dataset))
-            inputs, targets = dataset.__getitem__(index=idx)
+            inputs, targets, p_val_used = dataset.__getitem__(index=idx)
             p_val_used = dataset.experimental_trial_params[idx]['p']
 
         inputs = inputs.unsqueeze(0).to(device) # Add batch dim

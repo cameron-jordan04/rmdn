@@ -63,22 +63,32 @@ class RMDN(nn.Module):
         self.feedback_size = self.output_size * self.num_gaussians
 
         # Recurrent Layers
-        self.rnn = nn.GRU(input_size=self.input_size,
+        # self.rnn = nn.GRU(input_size=self.input_size,
+        #                   hidden_size=self.hidden_size,
+        #                   num_layers=1,
+        #                   batch_first=True)
+
+        self.rnn = nn.GRU(input_size=(self.input_size + (2 * self.feedback_size) + self.output_size),
                           hidden_size=self.hidden_size,
-                          num_layers=1,
+                          num_layers=2,
+                          dropout=0.5,
                           batch_first=True)
 
         # fc Layer
         # fc in_features: hidden_size + mus_{t-1} + sigmas_{t-1} + y_{t-1}
-        self.fc = nn.Linear(in_features=(self.hidden_size + (2 * self.feedback_size) + self.output_size),
-                            out_features=(2 * self.hidden_size))
+
+        # self.fc = nn.Linear(in_features=(self.hidden_size + (2 * self.feedback_size) + self.output_size),
+        #                     out_features=(2 * self.hidden_size))
+
+        self.fc = nn.Linear(in_features=self.hidden_size,
+                            out_features=2 * self.hidden_size)
 
         # Mixture Density Output Layers
-        self.pi = nn.Linear(in_features=(2 * self.hidden_size),
+        self.pi = nn.Linear(in_features=2 * self.hidden_size,
                             out_features=self.num_gaussians) # Mixture cofficients
-        self.mu = nn.Linear(in_features=(2 * self.hidden_size),
+        self.mu = nn.Linear(in_features=2 * self.hidden_size,
                             out_features=self.feedback_size) # Means
-        self.sigma = nn.Linear(in_features=(2 * self.hidden_size),
+        self.sigma = nn.Linear(in_features=2 * self.hidden_size,
                                out_features=self.feedback_size) # Variances
 
         self.apply(self._init_weights)
@@ -149,13 +159,20 @@ class RMDN(nn.Module):
         for t in range(seq_len):
             # Recurrent Layer Output
             x_t = x[:, t, :].unsqueeze(1)
-            h_out, _ = self.rnn(x_t)
+            
+            x_stacked_t = torch.cat((x_t, mu_t_minus_one, sigma_t_minus_one, y_t_minus_one), dim=-1) ##
+            
+            #h_out, _ = self.rnn(x_t)
+            h_out, _ = self.rnn(x_stacked_t) ##
+            
             h_states.append(h_out)
 
             # fc Layer Output
-            # append previous mus, sigmas and output_value to the fc layer that feeds forward to mu and sigma
-            h_conditioned = torch.cat((h_out, mu_t_minus_one, sigma_t_minus_one, y_t_minus_one), dim=-1)
-            h_stacked = torch.tanh(self.fc(h_conditioned))
+            # append previous mus, sigmas and output_value to the hidden layer that feeds forward to fc layer
+            
+            #h_conditioned = torch.cat((h_out, mu_t_minus_one, sigma_t_minus_one, y_t_minus_one), dim=-1)
+            #h_stacked = torch.tanh(self.fc(h_conditioned))
+            h_stacked = torch.relu(self.fc(h_out)) ##
 
             # Mixture Density Outputs
             pi_t = self.pi(h_stacked).view(h_stacked.size(0), h_stacked.size(1), self.num_gaussians)
@@ -178,9 +195,16 @@ class RMDN(nn.Module):
                 # Stochastic Teacher/Target Forcing Policy
                 # Bengio, S. et al. (2015). Scheduled Sampling for Sequence Prediction with Recurrent Neural Networks. NIPS.
                 # Teacher Forcing for first n/2 epochs before introducing scheduled sampling
-                if epoch < 0.5 * max_epochs:
-                    y_t_minus_one = ground_truth
-                elif np.random.rand() < (epoch - 0.5 * max_epochs / 0.5 * max_epochs):
+
+                # if epoch < 0.5 * max_epochs:
+                #     y_t_minus_one = ground_truth
+                # elif np.random.rand() < (epoch - 0.5 * max_epochs / 0.5 * max_epochs):
+                #     y_t_minus_one = sampled_output
+                # else:
+                #     y_t_minus_one = ground_truth
+
+                # Scheduled sampling / stochastic teacher forcing
+                if np.random.rand() < (epoch / max_epochs):
                     y_t_minus_one = sampled_output
                 else:
                     y_t_minus_one = ground_truth
@@ -235,7 +259,7 @@ class RMDN(nn.Module):
 
 #######################################################
 ## Mixture Density Network Loss                      ##
-## (Implicitely) Conditional Negative Log-Likelihood ##
+## (Implicitly) Conditional Negative Log-Likelihood  ##
 #######################################################
 
 def mdn_loss(pi,
@@ -243,6 +267,7 @@ def mdn_loss(pi,
              sigma,
              targets,
              lambda_s=0.01,
+             lambda_mu=0.01,
              eps=1e-8):
     '''
     Computes the conditional negative log-likelihood for the MDN output.
@@ -264,6 +289,10 @@ def mdn_loss(pi,
     entropy_loss = -lambda_s * torch.sum(pi * torch.log(pi + eps), dim=-1)
     entropy_loss = entropy_loss.mean()
 
+    # Add l1 penalty to conditional mean values
+    #shifted_mu = torch.roll(mu, 1, 1)
+    #mean_loss = lambda_mu * nn.L1Loss()(mu, shifted_mu)
+
     targets = targets.unsqueeze(2).expand_as(mu)  # Match shape for mixture components
     pi = pi.unsqueeze(-1).expand_as(mu) # Reshape pi to use the same mixing coefficients for all outputs
 
@@ -272,4 +301,4 @@ def mdn_loss(pi,
     weighted_likelihood = torch.sum(pi * likelihood, dim=-1)
     loss = -torch.log(weighted_likelihood + eps).mean()  # Negative log-likelihood
 
-    return loss + entropy_loss
+    return loss + entropy_loss #+ mean_loss
