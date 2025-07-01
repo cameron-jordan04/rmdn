@@ -299,6 +299,20 @@ class DecisionDataset(Dataset):
         self.df = self.df.assign(bump_peak_time_idx=peak_times,
                                  std_dev_samples=std_devs,
                                  zero_until_idx=zero_until)
+        
+        # Ensure that the training set is balanced
+        min_count = self.df.groupby('offer_prob').size().min()
+        balanced_indices = []
+        for prob in [0.0, 20.0, 80.0, 100.0]:
+            prob_trials = self.df[self.df['offer_prob'] == prob]
+            if len(prob_trials) >= min_count:
+                sampled_trials = prob_trials.sample(n=min_count)
+                balanced_indices.extend(sampled_trials.index.tolist())
+            else:
+                logger.warning(f' Only {len(prob_trials)} trials for probability {prob}, need {min_count}')
+                balanced_indices.extend(prob_trials.index.tolist())
+
+        self.df = self.df.loc[balanced_indices]
 
     def __getitem__(self,
                     index,

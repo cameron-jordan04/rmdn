@@ -304,6 +304,7 @@ def mdn_loss(pi,
     entropy_loss = -lambda_s * torch.sum(pi * torch.log(pi + eps), dim=-1)
     entropy_loss = entropy_loss.mean()
 
+
     conditioning_loss = lambda_log * torch.nn.functional.cross_entropy(
         pi.view(-1, 2), # (batch*seq_len, 2)
         prob.view(-1).long() #(batch*seq_len,) - convert to class indices

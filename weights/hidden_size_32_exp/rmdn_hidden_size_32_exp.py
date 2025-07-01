@@ -2,6 +2,8 @@
 This module provides the architecture and loss functions that characterize
 recurrent mixture density networks
 
+Including fast and slow GRU networks with gating integration, and feedback modulation
+
 Methods
 -------
     RMDN : class
@@ -63,13 +65,25 @@ class RMDN(nn.Module):
         self.feedback_size = self.num_gaussians + 2 * (self.num_gaussians * self.output_size)
 
         # Recurrent Layer
-        # self.rnn learns to parameterize the distribution
-        self.rnn = nn.GRU(input_size=(self.input_size + self.feedback_size),
-                          hidden_size=self.hidden_size,
-                          num_layers=2,
-                          dropout=0.25,
-                          batch_first=True)
+        # self.rnn = nn.GRU(input_size=(self.input_size + self.feedback_size),
+        #                   hidden_size=self.hidden_size,
+        #                   num_layers=2,
+        #                   dropout=0.5,
+        #                   batch_first=True)
         
+        # Multi-scale RNNs
+        self.fast_rnn = nn.GRU(input_size=(self.input_size + self.feedback_size),
+                               hidden_size=self.hidden_size,
+                               batch_first=True)
+        
+        self.slow_rnn = nn.GRU(input_size=(self.input_size + self.feedback_size),
+                               hidden_size=self.hidden_size,
+                               batch_first=True)
+
+        # Gating mechanisms for integrating fast/slow network states
+        self.fast_gate = nn.Linear(self.hidden_size, self.hidden_size)
+        self.slow_gate = nn.Linear(self.hidden_size, self.hidden_size)
+
         # Integration Layer
         self.fc = nn.Linear(in_features=self.hidden_size,
                             out_features=2 * self.hidden_size)
@@ -82,13 +96,20 @@ class RMDN(nn.Module):
         self.sigma = nn.Linear(in_features=2 * self.hidden_size,
                                out_features=self.num_gaussians) # Variances
 
+        # Feedback Augmentation Layer
+        self.feedback = nn.Sequential(
+            nn.Linear(self.feedback_size, self.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, self.feedback_size),
+            nn.Dropout(0.1)
+        )
+
         # Process/Smooth Output
-        # self.output learns to produce cohesive 'bump-like' output structures
-        self.output_rnn = nn.GRU(input_size=2 * self.output_size,
-                   hidden_size=self.hidden_size,
-                   batch_first=True)
-        self.output_linear = nn.Linear(in_features=self.hidden_size,
-                      out_features=self.output_size)
+        self.output = nn.Sequential(
+            nn.Linear(2 * self.output_size, self.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, self.output_size)
+        )
 
         self.apply(self._init_weights)
 
@@ -156,37 +177,52 @@ class RMDN(nn.Module):
         output.append(y_t_minus_one)
 
         pis, mus, sigmas = [], [], []
-        h_states = []
+        h_states_fast, h_states_slow = [], []
 
-        hidden, output_hidden = None, None
+        # Initialize hidden states for RNNs
+        h_fast, h_slow = None, None
+        h_out_slow = torch.zeros(batch_size, 1, self.hidden_size, device=x.device)
+        slow_update_interval = 3
 
         for t in range(seq_len):
             # Recurrent Layer Output
             x_t = x[:, t, :].unsqueeze(1)
 
-            feedback_t = torch.cat((
+            feedback_t = self.feedback(torch.cat((
                 pi_t_minus_one,
                 mu_t_minus_one,
                 sigma_t_minus_one
-            ), dim=-1)
+            ), dim=-1))
 
             x_stacked_t = torch.cat((x_t, feedback_t), dim=-1)
 
-            h_rnn, hidden = self.rnn(x_stacked_t, hidden)
-            h_states.append(h_rnn)
+            # Fast RNN (updates every timestep)
+            h_out_fast, h_fast = self.fast_rnn(x_stacked_t, h_fast)
+            h_states_fast.append(h_out_fast)
 
+            # Slow RNN (updates every N timesteps)
+            if t % slow_update_interval == 0:
+                h_out_slow, h_slow = self.slow_rnn(x_stacked_t, h_slow)
+            h_states_slow.append(h_out_slow)
+
+            # Integrate fast and slow outputs
+            fast_gate = torch.sigmoid(self.fast_gate(h_out_fast))
+            slow_gate = torch.sigmoid(self.slow_gate(h_out_slow))
+
+            h_combined = fast_gate * h_out_fast + slow_gate * h_out_slow
+            
             # fc Layer Output
-            h_stacked = torch.relu(self.fc(h_rnn))
+            h_stacked = torch.relu(self.fc(h_combined))
 
             # Mixture Density Outputs
-            pi_t = self.pi(h_stacked).view(batch_size, 1, self.num_gaussians)
+            pi_t = self.pi(h_stacked).view(h_stacked.size(0), h_stacked.size(1), self.num_gaussians)
             pi_t = nn.functional.softmax(pi_t, dim=-1)
             pis.append(pi_t)
 
-            mu_t = self.mu(h_stacked).view(batch_size, 1, self.num_gaussians, self.output_size)
+            mu_t = self.mu(h_stacked).view(h_stacked.size(0), h_stacked.size(1), self.num_gaussians, self.output_size)
             mus.append(mu_t)
 
-            sigma_t = self.sigma(h_stacked).view(batch_size, 1, self.num_gaussians, self.output_size)
+            sigma_t = self.sigma(h_stacked).view(h_stacked.size(0), h_stacked.size(1), self.num_gaussians, self.output_size)
             sigma_t = torch.clamp(nn.Softplus()(sigma_t), min=1e-3)
             sigmas.append(sigma_t)
 
@@ -198,33 +234,34 @@ class RMDN(nn.Module):
             if train:
                 ground_truth = outputs[:, t, :].unsqueeze(1)
                 sampled_output = self._sample_output(pi_t, mu_t, sigma_t)
-                concatenated_flat = torch.cat((sampled_output, y_t_minus_one), dim=-1)
-                gru_out, output_hidden = self.output_rnn(concatenated_flat, output_hidden)
-                true_output = self.output_linear(gru_out)
+                concatenated_flat = torch.cat((sampled_output, y_t_minus_one), dim=-1).view(batch_size, -1)
+                true_output = self.output(concatenated_flat).unsqueeze(1)
                 output.append(true_output)
 
                 # Stochastic Teacher/Target Forcing Policy
                 # Bengio, S. et al. (2015). Scheduled Sampling for Sequence Prediction with Recurrent Neural Networks. NIPS.
                 
                 # Scheduled Sampling
-                teacher_forcing_prob = max(0.0, 1.0 - (epoch / max_epochs * 0.7)) # Transition faster to model outputs
+                teacher_forcing_prob = max(0.1, 1.0 - (epoch / max_epochs * 0.7)) # Transition faster to model outputs
                 if np.random.rand() < teacher_forcing_prob:
-                    y_t_minus_one = ground_truth
-                else:
                     y_t_minus_one = true_output
+                else:
+                    y_t_minus_one = ground_truth
 
             else:
                 sampled_output = self._sample_output(pi_t, mu_t, sigma_t)
-                concatenated_flat = torch.cat((sampled_output, y_t_minus_one), dim=-1)
-                gru_out, output_hidden = self.output_rnn(concatenated_flat, output_hidden)
-                true_output = self.output_linear(gru_out)
+                concatenated_flat = torch.cat((sampled_output, y_t_minus_one), dim=-1).view(batch_size, -1)
+                true_output = self.output(concatenated_flat).unsqueeze(1)
                 output.append(true_output)
+                y_t_minus_one = true_output
                 
+
         # Stack outputs
         pis = torch.stack(pis, dim=1).squeeze(2)
         mus = torch.stack(mus, dim=1).squeeze(2)
         sigmas = torch.stack(sigmas, dim=1).squeeze(2)
-        h_states = torch.stack(h_states, dim=1)
+        h_states_fast = torch.stack(h_states_fast, dim=1)
+        h_states_slow = torch.stack(h_states_slow, dim=1)
 
         if train:
             output = torch.stack(output, dim=1).squeeze(2)
@@ -232,7 +269,7 @@ class RMDN(nn.Module):
         else:
             output = torch.stack(output, dim=1).squeeze(2)
             if return_hidden:
-                return pis, mus, sigmas, output, h_states
+                return pis, mus, sigmas, output, h_states_fast, h_states_slow
             else:
                 return pis, mus, sigmas, output
 
@@ -278,8 +315,8 @@ def mdn_loss(pi,
              output,
              targets,
              prob,
-             lambda_s=0.1,
-             lambda_log=0.5,
+             lambda_s=0.0,
+             lambda_log=0.1,
              eps=1e-8):
     '''
     Computes the conditional negative log-likelihood for the MDN output.
@@ -299,26 +336,25 @@ def mdn_loss(pi,
     '''
 
     # Add Entropy Regularization to the Mixture Weights
-    ## Entropy loss prevents extreme confidence in one mixture component, 
-    ## hopefully leading to smoother output dynamics
+    ## Entropy loss prevents extreme confidence in one mixture component, hopefully leading to smoother output dynamics
     entropy_loss = -lambda_s * torch.sum(pi * torch.log(pi + eps), dim=-1)
     entropy_loss = entropy_loss.mean()
 
-    conditioning_loss = lambda_log * torch.nn.functional.cross_entropy(
-        pi.view(-1, 2), # (batch*seq_len, 2)
-        prob.view(-1).long() #(batch*seq_len,) - convert to class indices
+    # If prob represents P(reward | tone), then:
+    ## pi[:, :, 0] => P(accept | tone)
+    ## pi[:, :, 1] => P(reject | tone)
+    log_loss = -lambda_log * (
+        prob * torch.log(pi[:, :, 0] + eps) + 
+        (1 - prob) * torch.log(pi[:, :, 1] + eps)
     )
 
     # Negative log likelihood
     targets = targets.unsqueeze(2).expand_as(mu)  # Match shape for mixture components
-    pi = pi.unsqueeze(-1).expand_as(mu) # Reshape pi
+    pi = pi.unsqueeze(-1).expand_as(mu) # Reshape pi to use the same mixing coefficients for all outputs
 
     dist = torch.distributions.Normal(mu, sigma)
     likelihood = torch.exp(dist.log_prob(targets))  # Probability density
-    weighted_likelihood = torch.sum(pi * likelihood, dim=2)
+    weighted_likelihood = torch.sum(pi * likelihood, dim=-1)
     nll_loss = -torch.log(weighted_likelihood + eps).mean()  # Negative log-likelihood
 
-    # Penalize excessive variance
-    variance_penalty = 0.1 * torch.mean(sigma**2)
-
-    return nll_loss + entropy_loss + conditioning_loss + variance_penalty
+    return nll_loss + entropy_loss + log_loss.mean()
