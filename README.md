@@ -5,7 +5,8 @@ A Recurrent Mixture Density Network implementation for the analysis of experimen
 - Cameron Jordan (UC Berkeley)
 
 **The architecture has changed several times**
-Within each weights folder, find the corresponding architecture; which can be used to load the weights. 
+
+Within each weights folder, find the corresponding architecture (.py - implementation of the architecture); which can be used to load the weights. 
 
 There are two primary architectures:
 1. Recurrent Mixture Density Network, which employs a two Gaussian mixture; with auxiliary loss functions to align the different modes to the Accept/Reject modes.
